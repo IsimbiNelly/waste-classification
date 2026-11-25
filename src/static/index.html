@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Waste Classification</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root { --green:#2e7d4f; --light:#eef6f0; --text:#1f2a24; --muted:#5d6b63; --border:#d5e3d9; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, Arial, sans-serif; background:#f6f9f7; color:var(--text); }
+  header { background:var(--green); color:#fff; padding:16px 24px; display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:8px; }
+  header h1 { margin:0; font-size:1.3rem; }
+  #uptime { font-size:0.9rem; background:rgba(255,255,255,0.18); padding:6px 12px; border-radius:20px; }
+  .dot { display:inline-block; width:10px; height:10px; border-radius:50%; background:#9aa; margin-right:6px; }
+  .dot.up { background:#7CFC9A; } .dot.down { background:#ff6b6b; }
+  main { max-width:1000px; margin:20px auto; padding:0 16px; display:grid; gap:16px; }
+  .card { background:#fff; border:1px solid var(--border); border-radius:12px; padding:18px; }
+  .card h2 { margin:0 0 12px; font-size:1.1rem; color:var(--green); }
+  .row { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-bottom:10px; }
+  button { background:var(--green); color:#fff; border:0; padding:9px 16px; border-radius:8px; cursor:pointer; font-size:0.95rem; }
+  button:disabled { opacity:0.5; cursor:not-allowed; }
+  button.alt { background:#fff; color:var(--green); border:1px solid var(--green); }
+  select, input[type=file] { padding:7px; border:1px solid var(--border); border-radius:8px; background:#fff; }
+  #preview { max-width:220px; max-height:220px; border-radius:8px; display:none; margin-top:6px; }
+  .result { margin-top:10px; padding:12px; background:var(--light); border-radius:8px; display:none; }
+  .result b { font-size:1.2rem; }
+  .bar { display:flex; align-items:center; gap:8px; margin:3px 0; font-size:0.85rem; }
+  .bar span.name { width:80px; } .bar .track { flex:1; background:#dfeae3; border-radius:4px; height:10px; }
+  .bar .fill { background:var(--green); height:10px; border-radius:4px; }
+  .msg { font-size:0.9rem; color:var(--muted); margin-top:6px; }
+  .grid2 { display:grid; grid-template-columns:repeat(auto-fit, minmax(300px, 1fr)); gap:16px; }
+  .chartbox { position:relative; height:280px; }
+  ul.insights { margin:0; padding-left:18px; line-height:1.5; }
+  .metric { display:inline-block; margin:4px 8px 4px 0; padding:6px 12px; background:var(--light); border-radius:8px; font-size:0.9rem; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Waste Classification</h1>
+  <div id="uptime"><span class="dot" id="dot"></span><span id="uptimeText">Checking...</span></div>
+</header>
+
+<main>
+  <section class="card">
+    <h2>1. Predict one image</h2>
+    <div class="row">
+      <input type="file" id="predFile" accept="image/*">
+      <button id="predBtn">Predict</button>
+    </div>
+    <img id="preview" alt="Selected image preview">
+    <div class="result" id="predResult"></div>
+    <div class="msg" id="predMsg"></div>
+  </section>
+
+  <section class="card">
+    <h2>2. Upload new data and retrain</h2>
+    <div class="row">
+      <label for="labelSelect">Class of these images:</label>
+      <select id="labelSelect"></select>
+      <input type="file" id="upFiles" accept="image/*" multiple>
+      <button id="upBtn" class="alt">Upload images</button>
+    </div>
+    <div class="msg" id="upMsg"></div>
+    <div class="row" style="margin-top:14px;">
+      <button id="retrainBtn">Retrain model</button>
+      <span class="msg" id="retrainMsg">Retraining also starts automatically when 50 or more new images are waiting.</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>3. Model performance</h2>
+    <div id="metricsBox" class="msg">Loading...</div>
+  </section>
+
+  <section class="grid2">
+    <div class="card">
+      <h2>Images per class</h2>
+      <div class="chartbox"><canvas id="statsChart"></canvas></div>
+      <div class="msg" id="pendingText"></div>
+    </div>
+    <div class="card"><h2>Model scores (test set)</h2><div class="chartbox"><canvas id="metricsChart"></canvas></div></div>
+  </section>
+
+  <section class="card">
+    <h2>4. What the data tells us</h2>
+    <ul class="insights">
+      <li><b>Class balance:</b> paper has 594 images but trash only 137. The model sees far fewer trash examples, so trash gets the lowest F1 score. Class weights were used to compensate.</li>
+      <li><b>Image variety:</b> photos of one class differ in angle, light and object type (plastic bottles and plastic bags), so the model must learn shapes and textures. Augmentation and a pretrained MobileNetV2 help with this.</li>
+      <li><b>Brightness:</b> cardboard is the darkest class (about 153) and glass the brightest (about 172). The gap is small, so brightness alone cannot separate the classes.</li>
+    </ul>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let statsChart = null, metricsChart = null, labelsFilled = false;
+
+function fmtTime(s) {
+  s = Math.floor(s);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return (h ? h + "h " : "") + (m ? m + "m " : "") + sec + "s";
+}
+
+// ---- Uptime ----
+async function refreshHealth() {
+  try {
+    const d = await (await fetch("/health")).json();
+    $("dot").className = "dot up";
+    $("uptimeText").textContent = "Model up " + fmtTime(d.uptime_seconds) +
+      " | " + d.predictions_served + " predictions | retrain: " + d.retrain_state;
+    if (!labelsFilled && d.classes.length) {
+      d.classes.forEach(c => { const o = document.createElement("option"); o.value = c; o.textContent = c; $("labelSelect").appendChild(o); });
+      labelsFilled = true;
+    }
+  } catch (e) {
+    $("dot").className = "dot down";
+    $("uptimeText").textContent = "API is down";
+  }
+}
+
+// ---- Predict ----
+$("predFile").addEventListener("change", () => {
+  const f = $("predFile").files[0];
+  if (f) { $("preview").src = URL.createObjectURL(f); $("preview").style.display = "block"; }
+});
+
+$("predBtn").addEventListener("click", async () => {
+  const f = $("predFile").files[0];
+  if (!f) { $("predMsg").textContent = "Please choose an image first."; return; }
+  $("predMsg").textContent = "Predicting...";
+  const fd = new FormData(); fd.append("file", f);
+  try {
+    const r = await fetch("/predict", { method: "POST", body: fd });
+    const d = await r.json();
+    if (!r.ok) { $("predMsg").textContent = d.detail || "Error"; return; }
+    $("predMsg").textContent = "";
+    const box = $("predResult"); box.style.display = "block"; box.innerHTML = "";
+    const title = document.createElement("div");
+    title.innerHTML = "Prediction: <b></b> (" + (d.confidence * 100).toFixed(1) + "% confident)";
+    title.querySelector("b").textContent = d.prediction;
+    box.appendChild(title);
+    Object.entries(d.scores).sort((a, b) => b[1] - a[1]).forEach(([name, p]) => {
+      const row = document.createElement("div"); row.className = "bar";
+      row.innerHTML = '<span class="name"></span><div class="track"><div class="fill"></div></div><span></span>';
+      row.children[0].textContent = name;
+      row.querySelector(".fill").style.width = (p * 100) + "%";
+      row.children[2].textContent = (p * 100).toFixed(1) + "%";
+      box.appendChild(row);
+    });
+    refreshHealth();
+  } catch (e) { $("predMsg").textContent = "Could not reach the API."; }
+});
+
+// ---- Upload ----
+$("upBtn").addEventListener("click", async () => {
+  const files = $("upFiles").files;
+  if (!files.length) { $("upMsg").textContent = "Please choose one or more images first."; return; }
+  const fd = new FormData();
+  fd.append("label", $("labelSelect").value);
+  for (const f of files) fd.append("files", f);
+  $("upMsg").textContent = "Uploading " + files.length + " files...";
+  try {
+    const r = await fetch("/upload", { method: "POST", body: fd });
+    const d = await r.json();
+    if (!r.ok) { $("upMsg").textContent = d.detail || "Error"; return; }
+    $("upMsg").textContent = "Saved " + d.saved + " images as " + d.label + ". Waiting for retraining: " + d.pending_images +
+      (d.auto_retrain_triggered ? " (automatic retraining started)" : "");
+    if (d.auto_retrain_triggered) watchRetraining();
+    $("upFiles").value = "";
+    loadStats();
+  } catch (e) { $("upMsg").textContent = "Could not reach the API."; }
+});
+
+// ---- Retrain ----
+$("retrainBtn").addEventListener("click", async () => {
+  $("retrainBtn").disabled = true;
+  try {
+    const r = await fetch("/retrain", { method: "POST" });
+    const d = await r.json();
+    if (!r.ok) { $("retrainMsg").textContent = d.detail || "Error"; $("retrainBtn").disabled = false; return; }
+    watchRetraining();
+  } catch (e) { $("retrainMsg").textContent = "Could not reach the API."; $("retrainBtn").disabled = false; }
+});
+
+function watchRetraining() {
+  $("retrainBtn").disabled = true;
+  $("retrainMsg").textContent = "Retraining is running. This can take several minutes...";
+  const timer = setInterval(async () => {
+    try {
+      const d = await (await fetch("/retrain/status")).json();
+      if (d.state !== "running") {
+        clearInterval(timer);
+        $("retrainBtn").disabled = false;
+        if (d.state === "done" && d.last_metrics) {
+          const m = d.last_metrics;
+          $("retrainMsg").textContent = "Retraining finished. New accuracy: " + m.accuracy +
+            " | new images used: " + m.new_images_used;
+          $("upMsg").textContent = "Retraining finished. The uploaded images are now part of the training data.";
+        } else {
+          $("retrainMsg").textContent = d.message;
+        }
+        loadMetrics(); loadStats(); refreshHealth();
+      }
+    } catch (e) { /* keep waiting */ }
+  }, 4000);
+}
+
+// ---- Metrics ----
+async function loadMetrics() {
+  const d = await (await fetch("/metrics")).json();
+  const box = $("metricsBox");
+  if (!d.available) { box.textContent = "No metrics yet. Run a retraining first."; return; }
+  box.innerHTML = "";
+  [["Accuracy", d.accuracy], ["Loss", d.loss], ["Precision", d.precision], ["Recall", d.recall], ["F1", d.f1]].forEach(([k, v]) => {
+    const s = document.createElement("span"); s.className = "metric"; s.textContent = k + ": " + v; box.appendChild(s);
+  });
+  const info = document.createElement("div"); info.className = "msg";
+  info.textContent = "Last trained: " + d.trained_at + " | new images used: " + d.new_images_used + " | epochs: " + d.epochs_run;
+  box.appendChild(info);
+
+  const vals = [d.accuracy, d.precision, d.recall, d.f1];
+  if (metricsChart) metricsChart.destroy();
+  metricsChart = new Chart($("metricsChart"), {
+    type: "bar",
+    data: { labels: ["Accuracy", "Precision", "Recall", "F1"], datasets: [{ data: vals, backgroundColor: "#2e7d4f" }] },
+    options: { maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { min: 0.7, max: 1 } } }
+  });
+}
+
+// ---- Stats ----
+async function loadStats() {
+  const d = await (await fetch("/stats")).json();
+  const waiting = d.uploads_pending.reduce((a, b) => a + b, 0);
+  $("pendingText").textContent = waiting === 0
+    ? "No new images waiting for retraining."
+    : "New images waiting for retraining: " + waiting;
+  if (statsChart) statsChart.destroy();
+  statsChart = new Chart($("statsChart"), {
+    type: "bar",
+    data: {
+      labels: d.classes,
+      datasets: [
+        { label: "Train", data: d.train, backgroundColor: "#2e7d4f" },
+        { label: "Test", data: d.test, backgroundColor: "#8fc6a2" },
+        { label: "New uploads waiting", data: d.uploads_pending, backgroundColor: "#e0a030" }
+      ]
+    },
+    options: { maintainAspectRatio: false, scales: { x: { stacked: true }, y: { stacked: true } } }
+  });
+}
+
+refreshHealth(); loadMetrics(); loadStats();
+setInterval(refreshHealth, 5000);
+</script>
+</body>
+</html>
