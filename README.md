@@ -4,7 +4,7 @@ An image classification app that identifies the type of waste in a photo (cardbo
 
 ## Links
 - **Video demo:** VIDEO_LINK_HERE
-- **Live URL:** URL_HERE (or: runs locally at http://localhost:8000)
+- **Deployment:** packaged as a Docker image with a web UI (see "Run with Docker" below), running at http://localhost:8000. Free cloud tiers either lack the memory TensorFlow needs or require a paid plan, so the app is delivered as a Docker container that can run on any container host.
 
 ## Project description
 - **Data:** the Kaggle "Garbage Classification" dataset (cchangcs), 2,527 images in 6 classes.
