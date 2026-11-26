@@ -1,5 +1,5 @@
 # src/api.py
-# The API: web page, predict, uptime, bulk upload, retraining trigger, stats and metrics.
+# The API: web page, predict, uptime, bulk upload, retraining trigger, stats, metrics and database.
 
 import json
 import os
@@ -10,6 +10,7 @@ from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadF
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
+import database
 import prediction
 import retrain as retrain_module
 
@@ -33,7 +34,8 @@ retrain_status = {"state": "idle", "message": "No retraining yet", "last_metrics
 
 @app.on_event("startup")
 def startup():
-    """Load the model once when the API starts."""
+    """Create the database tables and load the model once when the API starts."""
+    database.init_db()
     prediction.load_model()
 
 
@@ -77,7 +79,7 @@ async def predict(file: UploadFile = File(...)):
 async def upload(background_tasks: BackgroundTasks,
                  label: str = Form(...),
                  files: list[UploadFile] = File(...)):
-    """Upload many images of ONE class. They are saved for the next retraining."""
+    """Upload many images of ONE class. They are saved to disk and logged in the database."""
     if label not in prediction.class_names:
         raise HTTPException(status_code=400,
                             detail=f"Label must be one of {prediction.class_names}")
@@ -91,8 +93,10 @@ async def upload(background_tasks: BackgroundTasks,
         if ext not in IMAGE_EXTS:
             continue    # skip files that are not images
         name = f"{uuid.uuid4().hex[:8]}{ext}"
-        with open(os.path.join(folder, name), "wb") as out:
+        path = os.path.join(folder, name)
+        with open(path, "wb") as out:
             out.write(await f.read())
+        database.add_upload(name, label, path)    # save a record in the database
         saved += 1
 
     pending = sum(retrain_module.count_uploads().values())
@@ -111,7 +115,9 @@ def run_retraining():
     """Runs in the background so the API stays responsive."""
     try:
         metrics = retrain_module.retrain()
-        prediction.load_model()          # use the new model right away
+        database.log_retrain(metrics)       # save the scores of this run
+        database.mark_uploads_used()        # the waiting uploads are now part of training
+        prediction.load_model()             # use the new model right away
         retrain_status.update(state="done", message="Retraining finished",
                               last_metrics=metrics)
     except Exception as e:
@@ -131,6 +137,13 @@ def retrain_button(background_tasks: BackgroundTasks):
 @app.get("/retrain/status")
 def retrain_progress():
     return retrain_status
+
+
+# ---------- Database ----------
+@app.get("/db/summary")
+def db_summary():
+    """What the database holds: logged uploads and the latest retraining runs."""
+    return database.summary()
 
 
 # ---------- Metrics and stats (for the web page) ----------
